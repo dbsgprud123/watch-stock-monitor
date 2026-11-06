@@ -1,0 +1,116 @@
+const stores = [
+  { name: 'ATOWAK', origin: 'https://atowak.com' },
+  { name: 'ZEROO TIME', origin: 'https://zerootime.com/en-global' },
+];
+
+async function catalog(store) {
+  const { origin, cache, pending } = store;
+  if (cache && Date.now() - Date.parse(cache.checkedAt) < 60000) return cache;
+  if (pending) return pending;
+  store.pending = (async () => {
+    const products = new Map();
+    for (let page = 1; page <= 8; page++) {
+      const res = await fetch(origin + '/products.json?limit=250&page=' + page, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+      if (!res.ok) throw Error('Catalog HTTP ' + res.status);
+      const data = await res.json();
+      if (!Array.isArray(data.products)) throw Error('Invalid catalog');
+      for (const p of data.products) {
+        if (!/^[a-z0-9][a-z0-9-]*$/i.test(p.handle) || !p.title) continue;
+        const variants = Array.isArray(p.variants) ? p.variants : [];
+        const status = variants.some(v => v.available === true) ? (/ship in|pre.?order|예약/i.test(p.title) ? 'preorder' : 'available') : variants.length && variants.every(v => v.available === false) ? 'sold' : 'unknown';
+        const asset = p.images?.[0]?.src;
+        products.set(p.handle, { brand:store.name, title:p.title, type:p.product_type || '', url:origin+'/products/'+p.handle, image:typeof asset === 'string' && /^https:\/\/(cdn\.shopify\.com|atowak\.com)\//i.test(asset) ? asset : '', status, variants:variants.filter(v=>v.title && v.title !== 'Default Title').map(v=>({title:v.title, available:typeof v.available==='boolean'?v.available:null})) });
+      }
+      if (data.products.length < 250) break;
+      if (page === 8) throw Error('Incomplete catalog');
+    }
+    if (!products.size || [...products.values()].every(p=>p.status==='unknown')) throw Error('Missing availability');
+    return store.cache = { checkedAt:new Date().toISOString(), products:[...products.values()].sort((a,b)=>a.title.localeCompare(b.title)) };
+  })();
+  try { return await store.pending; } finally { store.pending = null; }
+}
+const worker = { async fetch(request) {
+  const path = new URL(request.url).pathname;
+  if (request.method !== 'GET') return new Response(null,{status:405});
+  if (path === '/api/stock') {
+    const catalogs = await Promise.all(stores.map(async store => {
+      try {
+        return { brand: store.name, ...await catalog(store) };
+      } catch (error) {
+        console.error(store.name + ': ' + error.message);
+        return { brand: store.name, products: [], ...store.cache, failed: true };
+      }
+    }));
+    return Response.json({ catalogs }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+  if (path !== '/') return new Response(null,{status:404});
+  return new Response(html,{headers:{'Content-Type':'text/html; charset=utf-8'}});
+}};
+const html = `<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>시계 재고 모니터</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f3f3ef;color:#171b18;font:15px system-ui,sans-serif}header{background:#161d19;color:white} .wrap{max-width:1150px;margin:auto;padding:0 26px} .head{padding-top:40px;padding-bottom:43px}.eyebrow{color:#c1e478;letter-spacing:.18em;font-size:12px;font-weight:800}h1{font-size:clamp(31px,5vw,52px);letter-spacing:-.07em;margin:12px 0 5px}header p{color:#ccd3cd;margin:0}main{padding-top:24px!important;padding-bottom:40px!important}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;margin:0 0 22px}.tile{background:white;border:1px solid #dfe2da;border-radius:13px;padding:14px 16px}.tile strong{display:block;font-size:28px;margin-top:4px}.tile span{color:#516055;font-size:13px}.controls{display:flex;gap:9px;flex-wrap:wrap;align-items:center}.controls input{flex:1;min-width:190px}input,select,button{font:inherit;padding:11px 13px;border:1px solid #ccd2c9;border-radius:8px;background:white;color:#1e2921}button{cursor:pointer;background:#203729;color:white;font-weight:700}button:disabled{opacity:.6;cursor:wait}.note{margin:12px 0 20px;min-height:20px;color:#506052;font-size:13px}.error{color:#9a332c}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:13px}.card{background:white;border:1px solid #dfe2da;border-radius:13px;overflow:hidden;display:flex;flex-direction:column}.photo{width:100%;height:160px;object-fit:contain;background:#f7f7f3}.body{padding:14px;flex:1}.badge{display:inline-block;padding:4px 8px;border-radius:20px;background:#ecefeb;color:#48544a;font-size:12px;font-weight:800}.available{background:#e1efd9;color:#25552e}.sold{background:#f7e5e3;color:#8d2d29}.preorder{background:#f6edce;color:#685119}h2{font-size:16px;margin:10px 0 7px}.type,details{color:#566457;font-size:13px}details{margin:8px 0}summary{cursor:pointer}a{color:#24503a}.official{display:inline-block;margin-top:9px}footer{margin-top:22px;font-size:12px;color:#526055}
+</style><header><div class="wrap head"><div class="eyebrow">ATOWAK · ZEROO TIME / STOCK WATCH</div><h1>시계 재고 모니터</h1><p>공식 온라인 스토어의 상품별 판매 상태를 한눈에 확인하세요.</p></div></header><main class="wrap"><div class="stats" id="stats"></div><div class="controls"><input type="search" id="q" aria-label="상품 검색" placeholder="모델명 또는 제품 유형 검색"><select id="brand" aria-label="브랜드 필터"><option value="">모든 브랜드</option><option>ATOWAK</option><option>ZEROO TIME</option></select><select id="f" aria-label="판매 상태 필터"><option value="">모든 상태</option><option value="sold">품절</option><option value="available">주문 가능</option><option value="preorder">예약·추후 발송</option><option value="unknown">확인 불가</option></select><button id="reload">재고 새로고침</button></div><p id="note" class="note" role="status" aria-live="polite"></p><div class="grid" id="grid"></div><footer>출처: <a href="https://atowak.com/collections/all" target="_blank" rel="noopener">ATOWAK 공식 상품 목록</a> · <a href="https://zerootime.com/en-global" target="_blank" rel="noopener">ZEROO TIME 글로벌 공식몰</a> · 최종 주문 가능 여부와 배송 일정은 공식몰에서 확인하세요.</footer></main><script>
+const by=id=>document.getElementById(id), stats=by('stats'), grid=by('grid'), note=by('note'), q=by('q'), f=by('f'), brand=by('brand'), reload=by('reload');
+const labels={available:'주문 가능',sold:'품절',preorder:'예약·추후 발송',unknown:'확인 불가'};
+let data, problem='', busy=false;
+function el(tag,cls,value){const e=document.createElement(tag); if(cls)e.className=cls;if(value!=null)e.textContent=value;return e}
+function render(){
+ const catalogs=(data?.catalogs||[]).filter(c=>!brand.value||c.brand===brand.value);
+ const all=catalogs.flatMap(c=>c.products);
+ const hasResults=catalogs.some(c=>c.checkedAt);
+ const term=q.value.trim().toLowerCase();
+ const items=all.filter(p=>(!f.value||p.status===f.value)&&(!term||(p.title+' '+p.type+' '+p.variants.map(v=>v.title).join(' ')).toLowerCase().includes(term)));
+ stats.replaceChildren(...[['전체 상품',all.length],...Object.entries(labels).map(([key,label])=>[label,all.filter(p=>p.status===key).length])].map(([label,n])=>{const t=el('div','tile');t.append(el('span','',label),el('strong','',hasResults?n:'—'));return t}));
+ const statusLines=catalogs.map(c=>{
+   const time=c.checkedAt ? new Date(c.checkedAt).toLocaleString('ko-KR',{timeZone:'Asia/Seoul'}) : '';
+   if(c.failed)return c.brand+' 조회 실패'+(time?' · 이전 결과 '+time:'');
+   return c.brand+' '+time;
+ });
+ note.classList.toggle('error',!!problem||catalogs.some(c=>c.failed));
+ note.textContent=busy?'공식몰 재고 확인 중…':[problem,hasResults?items.length+'개 표시':'',...statusLines].filter(Boolean).join(' | ');
+ grid.replaceChildren(...items.map(p=>{
+  const a=el('article','card');if(p.image){const i=el('img','photo');i.src=p.image;i.alt='';i.loading='lazy';i.referrerPolicy='no-referrer';a.append(i)}
+  const b=el('div','body');b.append(el('span','badge '+p.status,labels[p.status]),el('h2','',p.title));b.append(el('div','type',p.brand+(p.type?' · '+p.type:'')));
+  if(p.variants.length){const d=el('details');d.append(el('summary','','옵션별 판매 상태'));for(const v of p.variants)d.append(el('div','',v.title+' · '+(v.available===null?labels.unknown:v.available?(p.status==='preorder'?labels.preorder:labels.available):labels.sold)));b.append(d)}
+  const l=el('a','official','공식 상품 보기 ↗');l.href=p.url;l.target='_blank';l.rel='noopener';b.append(l);a.append(b);return a;
+ }));
+ if(hasResults&&!items.length)grid.append(el('p','','조건에 맞는 상품이 없습니다.'));
+}
+const browserStores=${JSON.stringify(stores)};
+${catalog.toString()}
+async function refresh(){
+ if(busy)return;
+ busy=true;reload.disabled=true;problem='';render();
+ try {
+   if(location.hostname==='127.0.0.1'){
+     const response=await fetch('/api/stock',{cache:'no-store'});
+     if(!response.ok)throw Error();
+     data=await response.json();
+   } else {
+     const catalogs=await Promise.all(browserStores.map(async store=>{
+       try {return {brand:store.name,...await catalog(store)}}
+       catch {return {brand:store.name,products:[],...store.cache,failed:true}}
+     }));
+     data={catalogs};
+   }
+ } catch {problem='공식몰 재고를 확인하지 못했습니다.'}
+ finally {busy=false;reload.disabled=false;render()}
+}
+q.addEventListener('input',render);f.addEventListener('change',render);brand.addEventListener('change',render);reload.addEventListener('click',refresh);refresh();setInterval(()=>{if(!document.hidden)refresh()},300000);
+</script></html>`;
+
+
+import http from 'node:http';
+const host='127.0.0.1';
+const server=http.createServer(async (req,res)=>{
+  const expected=host+':'+server.address().port;
+  if(req.headers.host!==expected || req.headers['sec-fetch-site']==='cross-site'){res.writeHead(403).end();return}
+  try {
+    const url=new URL(req.url,'http://'+expected);
+    if(url.host!==expected){res.writeHead(403).end();return}
+    const result=await worker.fetch(new Request(url,{method:req.method}));
+    res.writeHead(result.status,Object.fromEntries(result.headers));
+    res.end(Buffer.from(await result.arrayBuffer()));
+  } catch {res.writeHead(500).end();}
+});
+server.listen(0,host,()=>console.log('Open http://'+host+':'+server.address().port+' in your browser. Press Ctrl+C to stop.'));
+
